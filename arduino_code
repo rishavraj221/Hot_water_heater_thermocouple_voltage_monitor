@@ -1,0 +1,123 @@
+/******************************************************************************
+  HotWaterHeater
+
+  Measures the voltage coming from the hot water heater's thermocouple.
+  Uses signaling to send this voltage sensor measurement to the Raspberry Pi.
+ ****************************************************************************/
+
+//double ReferenceVoltage = 5.0; //unused reference voltage
+double ReferenceVoltage = 1.1;
+int OUTPUT_PIN = 9;
+int INTRA_DIGIT_WAIT=20;
+int BETWEEN_DIGIT_WAIT=50;
+
+///////////////////////////////////////////////////////////////////////////////
+// the setup function runs once when you press reset or power the board
+///////////////////////////////////////////////////////////////////////////////
+void setup() {
+  // initialize digital pin LED_BUILTIN as an output.
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(OUTPUT_PIN, OUTPUT);    // sets the digital pin 9 as output
+
+  analogReference(INTERNAL);
+  Serial.begin(9600);     //  opens serial port, sets data rate to 9600 bps
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// The loop function runs over and over again forever.
+// Measure the voltge on the input pin.
+// Then send that reading to the Raspberry Pi
+///////////////////////////////////////////////////////////////////////////////
+void loop() {
+  int pinInput;
+  double voltage;
+
+  pinInput = analogRead(A0); // Probe Input
+  Serial.print("PinInputA0=");
+  Serial.print(pinInput);
+
+  //The Arduino ADC is a ten-bit converter, meaning that the output value will range from 0 to 1023
+  voltage = (pinInput * ReferenceVoltage ) / 1023;
+  Serial.print(", voltageA0=");
+  Serial.println(voltage);
+
+  //Note: a reading of 5 = 5.38 mV
+  sendNumberSignal(pinInput, OUTPUT_PIN, INTRA_DIGIT_WAIT, BETWEEN_DIGIT_WAIT);
+
+  //Execute the check once every 30 seconds
+  delay(30000);
+}
+
+/******************************************************************************
+ * Signal a number on a single wire.
+ * 
+ * For each digit send a series of pulses.
+ * There is also an initial kick-off pulse.
+ * Each pulse looks like: __/ 20ms \__20ms__
+ * 20+20ms between rising edges within the same digit
+ * 
+ * Between digits: __/ 20ms \__20ms__ 50ms___
+ * 20+20+50ms between digits
+ *****************************************************************************/
+void sendNumberSignal(int number, int pin, int intraDigitWait, int betweenDigitWait) {
+  int tens = number/10;
+  int ones = number % 10;
+
+  Serial.print("Signaling: ");
+  Serial.println(number);
+
+  // debugging ////////
+  //Serial.print("tens: ");
+  //Serial.println(tens);
+  //Serial.print("ones: ");
+  //Serial.println(ones);
+  //Serial.print("millis: ");
+  //Serial.println(millis());
+
+  // debugging ////////
+  //Serial.println("send tens");
+  //Serial.print("millis: ");
+  //Serial.println(millis());
+
+  //send the tens number
+  sendPulse(pin, intraDigitWait);
+  for (int i=0; i<tens; i++) {
+    sendPulse(pin, intraDigitWait);
+  }
+
+  //Serial.println("before between delay");
+  //Serial.print("millis: ");
+  //Serial.println(millis());
+  delay(betweenDigitWait);
+  //Serial.println("after between delay");
+  //Serial.print("millis: ");
+  //Serial.println(millis());
+
+  // debugging ////////
+  //Serial.println("send ones");
+  //Serial.print("millis: ");
+  //Serial.println(millis());
+
+  //send the ones number
+  sendPulse(pin, intraDigitWait);
+  for (int i=0; i<ones; i++) {
+    sendPulse(pin, intraDigitWait);
+  }
+  delay(betweenDigitWait);
+}
+
+/******************************************************************************
+ * Send a pulse with the required wait times holding the pin high and then low.
+ *****************************************************************************/
+void sendPulse(int pin, int intraDigitWait) {
+  //Serial.print("pulse start ");
+  //Serial.println(millis());
+
+  digitalWrite(pin, HIGH);
+  delay(intraDigitWait);  //keep the pin high for intraDigitWait milliseconds
+  digitalWrite(pin, LOW);
+  delay(intraDigitWait);  //keep the pin low for intraDigitWait milliseconds
+
+  //Serial.print("pulse end   ");
+  //Serial.println(millis());
+}
