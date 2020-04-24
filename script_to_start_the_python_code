@@ -1,0 +1,6 @@
+#!/bin/bash
+# run_HotWaterNotifier.sh
+# Launch the notifier
+
+cd /home/pi/hotwater
+sudo python HotWaterNotifier.py
