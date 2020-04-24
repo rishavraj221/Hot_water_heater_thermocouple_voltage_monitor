@@ -1,0 +1,227 @@
+###############################################################################
+# HotWaterNotifier.py
+# Monitor the input pin and receive signals from an Arduino.
+# Decode the signals into numeric voltage sensor measurements.
+# When the received voltage reading is too low, this indicates that the
+# pilot light is out. When this occurs for 5 measurements in a row, assume that
+# the pilot light really is out. Send emails/texts and record the time.
+# Only send an email/text every six hours.
+#
+# This was written for Python 2.7. Minor changes may be required for Python 3.
+###############################################################################
+import smtplib
+import RPi.GPIO as GPIO
+import os
+import os.path
+import time
+import datetime
+import string
+import logging
+import sys
+
+#Input GPIO to receive signals from the Arduino
+GPIO_Alert=16
+
+# How many hours to wait between emails
+emailWaitHours=6
+
+# Low voltage sensor reading.
+# Less than or equal to this is low voltage.
+lowSensorReading=1
+
+# Once this many low sensor readings is reached, send the alert
+maxLowVoltageCount=5
+
+# for GPIO numbering, choose BCM
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(GPIO_Alert, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+lastEmailSentTime = datetime.datetime(2000,1,1,0,0,0,0) #declare global variable
+
+###############################################################################
+# Setup the logger.
+###############################################################################
+def setup_custom_logger(name):
+    formatter = logging.Formatter(fmt='%(asctime)s %(levelname)-8s %(message)s',
+                                  datefmt='%Y-%m-%d %H:%M:%S')
+    handler = logging.FileHandler('HotWaterLog.txt', mode='a')
+    handler.setFormatter(formatter)
+    screen_handler = logging.StreamHandler(stream=sys.stdout)
+    screen_handler.setFormatter(formatter)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    logger.addHandler(screen_handler)
+    return logger
+
+###############################################################################
+# Function to send emails/texts
+###############################################################################
+def send_email_alert():
+    # allow writing to the global variable
+    global lastEmailSentTime
+
+    # check if enough time has passed since the last email
+    nowTime = datetime.datetime.now()
+    emailWaitDelta = datetime.timedelta(hours=emailWaitHours)
+    limitTime = nowTime - emailWaitDelta
+
+    #if enough time has passed, send the email.
+    if lastEmailSentTime is None or limitTime > lastEmailSentTime:
+        logger.info('Sending email alert...')
+        HOST = "smtp.gmail.com"
+        PORT = 587
+        SUBJECT = "Hot Water Heater Alert"
+        #This should be a list object for multiple addresses
+        TO = ["XXXXXXXXXXXXXX@gmail.com", "5555555555@vtext.com"]
+        #TO = ["XXXXXXXXXXXXXX@gmail.com"]
+        FROM = "XXXXXXXXXXXXXX@gmail.com"
+        PWD = "XXXXXXXXXXXXXX"
+        text = "Low Voltage Measured on the Hot Water Heater"
+        #The to field is joined into 1 string here.
+        #This is what is displayed to the recipient on their email.
+        BODY = string.join(("from: %s" %FROM, "to: %s" %", ".join(TO), "Subject: %s" %SUBJECT, "     ", text), "\r\n")
+
+        try:
+            s = smtplib.SMTP(HOST,PORT)
+            s.set_debuglevel(1)
+            s.ehlo()
+            s.starttls()
+            s.login(FROM, PWD)
+            s.sendmail(FROM,TO,BODY)
+            s.quit
+        except Exception as e:
+            logger.exception('Exception caught file sending email. Trying again in 6 hours')
+
+        #set the time so that an email is not sent for 6 hours
+        lastEmailSentTime = nowTime
+    else:
+        logger.info('Not sending email. Last email sent at: ' + lastEmailSentTime.strftime("%Y-%m-%d %H:%M:%S"))
+
+###############################################################################
+# Receive signals from the Arduino.
+# A number is made up of two digits. (a tens place digit, and a ones place digit)
+# The Arduino always transmits a number, consisting of 2 digits.
+# The signals received are a series of high pulses on the input pin.
+# The waitReceiveNumber() method counts the high pulses and the [count -1] is
+# the value of the digit.
+# Each digit is preceeded by 1 pulse.
+#
+# 70 ms max between signal edges within the same digit
+#       rising edges separated by under 70ms are the same digit
+#       if greater than 70ms, then move to the next digit
+# 200 ms means the number is complete
+###############################################################################
+def waitReceiveNumber(GPIO_Alert):
+    lastSignalTime = datetime.datetime(2000,1,1,0,0,0,0)
+    isTens=True
+    isFirstIteration=True
+    tensValue=0
+    onesValue=0
+    receivedEdge=None
+
+    #Less than 70ms between pulses: this is the same digit still being transmitted
+    #   Increment the value of the current digit
+    #More than 70ms: switch to the next digit
+    singleDigitMilliseconds = datetime.timedelta(milliseconds=70)
+
+    #If this timeout is reached, it's the end of the number
+    wholeNumberWaitTime = 200
+
+    # wait here until a rising edge is detected
+    #logger.info('Waiting on GPIO pin: ' + str(GPIO_Alert))
+    while True:
+        #Arduino sends a pulse when you flash it, start the Raspberry Pi second.
+        #The Arduino should boot faster in the event of a power outage.
+        if isFirstIteration:
+            receivedEdge = GPIO.wait_for_edge(GPIO_Alert, GPIO.RISING, timeout=-1)  #wait forever until a kick-off pulse
+        else:
+            receivedEdge = GPIO.wait_for_edge(GPIO_Alert, GPIO.RISING, timeout=wholeNumberWaitTime)  #wait for up to waitTime ms
+
+        #calculate the timing metrics for this signal
+        signalTime = datetime.datetime.now()
+        signalInterval = signalTime - lastSignalTime
+        lastSignalTime = signalTime
+        #debugging: logger.info('signalInterval: ' + str(signalInterval.total_seconds() * 1000))
+
+        #determine what digit to increment
+        if (signalInterval < singleDigitMilliseconds) or isFirstIteration:
+            isFirstIteration=False
+            if isTens:
+                tensValue+=1
+            else: #isOnes
+                onesValue+=1
+        elif receivedEdge is not None:  #signalInterval >= singleNumberMilliseconds:
+            if isTens: #shift to ones
+                isTens = False
+                onesValue+=1
+            else: #isOnes
+                  #can't shift to next digit, so the number is complete.
+                  #This should not happen. Once the number is done,
+                  #the wait should timeout and receivedEdge should be None.
+                return ((tensValue -1)*10) + (onesValue -1)
+        else: #timeout, so number is complete.
+            return ((tensValue -1)*10) + (onesValue -1)
+
+###############################################################################
+# The main method
+###############################################################################
+def main():
+    logger.info('Starting HotWaterNotifier')
+    referenceVoltage = 1.1
+    lowVoltageCount=0
+
+    try:
+        while True:
+            #This will block until it receives signals from the Arduino.
+            #It will only return once a completed number is received.
+            sensorReading = waitReceiveNumber(GPIO_Alert)
+
+            #calulate the voltage from the Arduino sensor reading
+            voltage = (sensorReading * referenceVoltage ) / 1023;
+            logger.info('sensorReading: ' + str(sensorReading) + ', voltage: ' + str(voltage))
+
+            if sensorReading <= lowSensorReading:
+                lowVoltageCount+=1  #increment
+                if lowVoltageCount >= maxLowVoltageCount:
+                    logger.info('Low voltage alert')
+                    send_email_alert()
+                    lowVoltageCount=0  #reset the counter because we sent an alert
+            else:
+                lowVoltageCount=0  #reset the counter because a good voltage was received
+
+    except KeyboardInterrupt:
+        logger.info('Keyboard interrupt received')
+        GPIO.cleanup()       # clean up GPIO on CTRL+C exit
+
+    GPIO.cleanup()           # clean up GPIO
+
+###############################################################################
+# The test email method
+###############################################################################
+def testEmail():
+    logger.info('Starting HotWaterNotifier')
+    referenceVoltage = 1.1
+    lowVoltageCount=0
+
+    try:
+        send_email_alert()
+
+    except KeyboardInterrupt:
+        logger.info('Keyboard interrupt received')
+        GPIO.cleanup()       # clean up GPIO on CTRL+C exit
+
+    GPIO.cleanup()           # clean up GPIO
+
+###############################################################################
+# A Global Variable
+###############################################################################
+# Set up a log file
+logger = setup_custom_logger('HotWaterNotifier')
+
+###############################################################################
+# Call the main method.
+#
+# Call testEmail() here instead if you want to test the email capability.
+###############################################################################
+if __name__== "__main__":
+    main()
